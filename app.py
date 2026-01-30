@@ -12,9 +12,19 @@ API_KEY = os.getenv("GEMINI_API_KEY", "")
 DATA_DIR = Path(__file__).parent / "data"
 JOURNAL_DIR = DATA_DIR / "journal"
 CONTEXT_FILE = DATA_DIR / "context.md"
-BACKLOG_FILE = DATA_DIR / "backlog.json"
+TASKS_FILE = DATA_DIR / "tasks.json"
 CHAT_HISTORY_FILE = DATA_DIR / "chat_history.json"
 STREAK_FILE = DATA_DIR / "streak.json"
+ENERGY_FILE = DATA_DIR / "energy.json"
+
+# Life areas
+CATEGORIES = {
+    "work": "💼 Work",
+    "health": "🏃 Health",
+    "personal_brand": "🎯 Personal Brand", 
+    "daily_chores": "🏠 Daily Chores",
+    "learning": "📚 Learning"
+}
 
 # Ensure directories exist
 JOURNAL_DIR.mkdir(parents=True, exist_ok=True)
@@ -22,7 +32,7 @@ JOURNAL_DIR.mkdir(parents=True, exist_ok=True)
 # Setup Gemini
 if API_KEY:
     genai.configure(api_key=API_KEY)
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel('gemini-2.0-flash')
 else:
     model = None
 
@@ -42,13 +52,31 @@ def get_time_of_day():
 def read_context():
     if not CONTEXT_FILE.exists():
         default = """# About Me
-- Working style: [fill in]
-- Current focus: [fill in]
-- Energy patterns: [fill in]
 
-# Goals This Week
-- [ ] Goal 1
-- [ ] Goal 2
+## Working Style
+- Deep work best in: [morning/afternoon/evening]
+- Energy patterns: [describe]
+- Preferred work blocks: [duration]
+
+## Life Areas
+
+### Work
+- Role: [your role]
+- Current project: [project]
+- Key focus: [focus areas]
+
+### Health Goals
+- Workout: [goals]
+- Diet: [approach]
+- Sleep: [target hours]
+
+### Personal Brand
+- Platforms: [LinkedIn, blog, etc.]
+- Content themes: [topics]
+- Posting frequency: [target]
+
+### Notes
+- Add anything else the AI should know
 """
         CONTEXT_FILE.write_text(default)
     return CONTEXT_FILE.read_text()
@@ -56,34 +84,110 @@ def read_context():
 def save_context(content):
     CONTEXT_FILE.write_text(content)
 
-def read_backlog():
-    if not BACKLOG_FILE.exists():
-        BACKLOG_FILE.write_text("[]")
-        return []
-    return json.loads(BACKLOG_FILE.read_text())
+# --- TASK MANAGEMENT ---
+def read_tasks():
+    if not TASKS_FILE.exists():
+        default = {
+            "recurring": [],  # Daily tasks that reset
+            "tasks": []       # One-time tasks
+        }
+        TASKS_FILE.write_text(json.dumps(default, indent=2))
+        return default
+    return json.loads(TASKS_FILE.read_text())
 
-def save_backlog(tasks):
-    BACKLOG_FILE.write_text(json.dumps(tasks, indent=2))
+def save_tasks(data):
+    TASKS_FILE.write_text(json.dumps(data, indent=2))
 
-def add_task(task_text, priority="medium"):
-    tasks = read_backlog()
-    tasks.append({
-        "id": len(tasks) + 1,
+def add_task(task_text, category="work", is_recurring=False, priority="medium"):
+    data = read_tasks()
+    task = {
+        "id": datetime.now().strftime("%Y%m%d%H%M%S%f"),  # Unique ID
         "task": task_text,
+        "category": category,
         "priority": priority,
         "status": "todo",
         "created": get_today()
-    })
-    save_backlog(tasks)
+    }
+    
+    if is_recurring:
+        task["recurring"] = True
+        data["recurring"].append(task)
+    else:
+        data["tasks"].append(task)
+    
+    save_tasks(data)
+    return task["id"]
 
-def complete_task(task_id):
-    tasks = read_backlog()
-    for t in tasks:
+def complete_task(task_id, is_recurring=False):
+    data = read_tasks()
+    task_list = "recurring" if is_recurring else "tasks"
+    
+    for t in data[task_list]:
         if t["id"] == task_id:
-            t["status"] = "done"
-            t["completed"] = get_today()
-    save_backlog(tasks)
+            if is_recurring:
+                # For recurring, mark today's completion
+                if "completions" not in t:
+                    t["completions"] = []
+                t["completions"].append(get_today())
+            else:
+                t["status"] = "done"
+                t["completed"] = get_today()
+            break
+    
+    save_tasks(data)
 
+def delete_task(task_id, is_recurring=False):
+    data = read_tasks()
+    task_list = "recurring" if is_recurring else "tasks"
+    data[task_list] = [t for t in data[task_list] if t["id"] != task_id]
+    save_tasks(data)
+
+def get_open_tasks():
+    data = read_tasks()
+    return [t for t in data["tasks"] if t["status"] == "todo"]
+
+def get_recurring_tasks():
+    data = read_tasks()
+    today = get_today()
+    result = []
+    for t in data["recurring"]:
+        done_today = today in t.get("completions", [])
+        result.append({**t, "done_today": done_today})
+    return result
+
+# --- ENERGY TRACKING ---
+def read_energy():
+    if not ENERGY_FILE.exists():
+        return {}
+    return json.loads(ENERGY_FILE.read_text())
+
+def log_energy(level, note=""):
+    data = read_energy()
+    today = get_today()
+    timestamp = datetime.now().strftime("%H:%M")
+    
+    if today not in data:
+        data[today] = []
+    
+    data[today].append({
+        "time": timestamp,
+        "level": level,
+        "note": note
+    })
+    
+    ENERGY_FILE.write_text(json.dumps(data, indent=2))
+
+def get_today_energy():
+    data = read_energy()
+    return data.get(get_today(), [])
+
+def get_latest_energy():
+    today_energy = get_today_energy()
+    if today_energy:
+        return today_energy[-1]
+    return None
+
+# --- JOURNAL ---
 def get_journal_path(date=None):
     date = date or get_today()
     return JOURNAL_DIR / f"{date}.md"
@@ -95,7 +199,6 @@ def read_today_journal():
     return ""
 
 def append_journal(entry):
-    """Append-only journaling - never overwrites"""
     path = get_journal_path()
     timestamp = datetime.now().strftime("%H:%M")
     
@@ -107,13 +210,12 @@ def append_journal(entry):
     content += f"**{timestamp}** - {entry}\n\n"
     path.write_text(content)
 
+# --- CHAT ---
 def load_chat_history():
     if not CHAT_HISTORY_FILE.exists():
         return []
     data = json.loads(CHAT_HISTORY_FILE.read_text())
-    # Only load today's chat
-    today = get_today()
-    return data.get(today, [])
+    return data.get(get_today(), [])
 
 def save_chat_history(messages):
     today = get_today()
@@ -124,6 +226,7 @@ def save_chat_history(messages):
     data[today] = messages
     CHAT_HISTORY_FILE.write_text(json.dumps(data, indent=2))
 
+# --- STREAK ---
 def get_streak():
     if not STREAK_FILE.exists():
         return {"current": 0, "last_checkin": None, "start_date": get_today()}
@@ -134,7 +237,7 @@ def update_streak():
     today = get_today()
     
     if streak["last_checkin"] == today:
-        return streak  # Already checked in today
+        return streak
     
     if streak["last_checkin"]:
         last = datetime.strptime(streak["last_checkin"], "%Y-%m-%d")
@@ -143,7 +246,7 @@ def update_streak():
         if diff == 1:
             streak["current"] += 1
         elif diff > 1:
-            streak["current"] = 1  # Reset streak
+            streak["current"] = 1
     else:
         streak["current"] = 1
     
@@ -151,204 +254,284 @@ def update_streak():
     STREAK_FILE.write_text(json.dumps(streak, indent=2))
     return streak
 
+# --- AI RESPONSE ---
 def get_ai_response(user_input):
-    """Get AI response with full context"""
     if not model:
         return "⚠️ No API key set. Add GEMINI_API_KEY to your .env file."
     
     context = read_context()
     journal = read_today_journal()
-    tasks = read_backlog()
-    open_tasks = [t for t in tasks if t["status"] == "todo"]
+    open_tasks = get_open_tasks()
+    recurring = get_recurring_tasks()
+    energy = get_latest_energy()
     time_of_day = get_time_of_day()
     streak = get_streak()
+    
+    # Group tasks by category
+    tasks_by_cat = {}
+    for t in open_tasks:
+        cat = t.get("category", "work")
+        if cat not in tasks_by_cat:
+            tasks_by_cat[cat] = []
+        tasks_by_cat[cat].append(t["task"])
     
     system_prompt = f"""You are a thoughtful daily standup assistant. Be conversational, brief, and supportive.
 
 CURRENT TIME: {datetime.now().strftime("%H:%M")} ({time_of_day})
 STREAK: Day {streak['current']}
+LATEST ENERGY: {energy['level'] if energy else 'Not logged today'} {('- ' + energy['note']) if energy and energy.get('note') else ''}
 
 USER CONTEXT:
 {context}
 
-TODAY'S JOURNAL SO FAR:
-{journal if journal else "No entries yet today."}
+TODAY'S JOURNAL:
+{journal if journal else "No entries yet."}
 
-OPEN TASKS ({len(open_tasks)}):
-{json.dumps(open_tasks, indent=2) if open_tasks else "No open tasks."}
+OPEN TASKS BY AREA:
+{json.dumps(tasks_by_cat, indent=2) if tasks_by_cat else "No open tasks."}
+
+DAILY HABITS (Recurring):
+{', '.join([f"{'✓' if t['done_today'] else '○'} {t['task']}" for t in recurring]) if recurring else "None set up yet."}
 
 USER SAYS: {user_input}
 
 INSTRUCTIONS:
-- Respond naturally and briefly (2-3 sentences usually enough)
-- If they mention a new task, confirm you'll add it
-- If they complete something, acknowledge it warmly
-- In morning: help them set intentions
-- In evening: help them reflect
-- Track energy/mood mentions
-- Be encouraging but not cheesy
-
-If the user wants to ADD a task, include exactly: [ADD_TASK: task description]
-If the user COMPLETES a task, include exactly: [COMPLETE_TASK: task_id]
-If something important should be journaled, include exactly: [JOURNAL: the insight or update]
+- Respond naturally and briefly (2-3 sentences usually)
+- Consider their energy level when suggesting tasks
+- In morning: help set intentions based on energy
+- In evening: help reflect on the day
+- Be encouraging but real
+- If energy is low, suggest lighter tasks or breaks
+- DO NOT add tasks yourself - the user does that via the UI
+- DO NOT output any special tags or commands
+- Just have a helpful conversation
 """
     
     response = model.generate_content(system_prompt)
     return response.text
 
-def process_ai_actions(response_text):
-    """Parse and execute any actions from AI response"""
-    import re
-    
-    # Add tasks
-    task_matches = re.findall(r'\[ADD_TASK:\s*(.+?)\]', response_text)
-    for task in task_matches:
-        add_task(task.strip())
-    
-    # Complete tasks
-    complete_matches = re.findall(r'\[COMPLETE_TASK:\s*(\d+)\]', response_text)
-    for task_id in complete_matches:
-        complete_task(int(task_id))
-    
-    # Journal entries
-    journal_matches = re.findall(r'\[JOURNAL:\s*(.+?)\]', response_text)
-    for entry in journal_matches:
-        append_journal(entry.strip())
-    
-    # Clean response for display
-    clean = response_text
-    clean = re.sub(r'\[ADD_TASK:\s*.+?\]', '', clean)
-    clean = re.sub(r'\[COMPLETE_TASK:\s*\d+\]', '', clean)
-    clean = re.sub(r'\[JOURNAL:\s*.+?\]', '', clean)
-    return clean.strip()
-
 # --- STREAMLIT UI ---
 st.set_page_config(page_title="Daily Standup", page_icon="🎯", layout="wide")
 
-# Update streak on load
 streak = update_streak()
 
-# Header with streak
-col1, col2 = st.columns([3, 1])
+# Header
+col1, col2, col3 = st.columns([2, 1, 1])
 with col1:
     st.title("🎯 Daily Standup")
 with col2:
     if streak["current"] <= 21:
-        st.metric("Building Habit", f"Day {streak['current']}/21", delta=None)
+        st.metric("Building Habit", f"Day {streak['current']}/21")
     else:
         st.metric("🔥 Streak", f"{streak['current']} days")
+with col3:
+    latest_energy = get_latest_energy()
+    if latest_energy:
+        energy_emoji = {"high": "🔋", "medium": "🔋", "low": "🪫"}
+        st.metric("Energy", f"{energy_emoji.get(latest_energy['level'], '❓')} {latest_energy['level'].title()}")
+    else:
+        st.metric("Energy", "Not logged")
 
-# Initialize chat history from file
+# Initialize
 if "messages" not in st.session_state:
     st.session_state.messages = load_chat_history()
 
 # --- SIDEBAR ---
 with st.sidebar:
-    st.header("📋 Open Tasks")
-    tasks = read_backlog()
-    open_tasks = [t for t in tasks if t["status"] == "todo"]
+    # Energy Check-in
+    st.header("🔋 Energy Check")
+    energy_cols = st.columns(3)
+    with energy_cols[0]:
+        if st.button("🔋 High", use_container_width=True):
+            log_energy("high")
+            append_journal("Energy: High")
+            st.rerun()
+    with energy_cols[1]:
+        if st.button("🔋 Med", use_container_width=True):
+            log_energy("medium")
+            append_journal("Energy: Medium")
+            st.rerun()
+    with energy_cols[2]:
+        if st.button("🪫 Low", use_container_width=True):
+            log_energy("low")
+            append_journal("Energy: Low")
+            st.rerun()
     
-    if open_tasks:
-        for t in open_tasks:
-            col1, col2 = st.columns([4, 1])
-            with col1:
-                st.write(f"**{t['id']}**. {t['task']}")
-            with col2:
-                if st.button("✓", key=f"done_{t['id']}"):
-                    complete_task(t["id"])
-                    append_journal(f"Completed: {t['task']}")
-                    st.rerun()
-    else:
-        st.write("No open tasks. Nice! 🎉")
-    
-    st.divider()
-    
-    # Quick add task
-    st.subheader("Quick Add")
-    quick_task = st.text_input("New task", label_visibility="collapsed", placeholder="Add a task...")
-    if quick_task:
-        add_task(quick_task)
+    energy_note = st.text_input("Energy note (optional)", placeholder="Why this energy level?")
+    if energy_note and st.button("Log with note"):
+        log_energy("medium", energy_note)
+        append_journal(f"Energy note: {energy_note}")
         st.rerun()
     
     st.divider()
     
-    # Today's journal preview
-    st.subheader("📝 Today's Journal")
-    journal = read_today_journal()
-    if journal:
-        st.text_area("Journal", value=journal, height=200, disabled=True, label_visibility="collapsed")
+    # Daily Habits (Recurring)
+    st.header("📅 Daily Habits")
+    recurring = get_recurring_tasks()
+    
+    if recurring:
+        for t in recurring:
+            col1, col2 = st.columns([4, 1])
+            with col1:
+                icon = CATEGORIES.get(t.get("category", "work"), "📌").split()[0]
+                status = "✅" if t["done_today"] else "○"
+                st.write(f"{status} {icon} {t['task']}")
+            with col2:
+                if not t["done_today"]:
+                    if st.button("✓", key=f"rec_{t['id']}"):
+                        complete_task(t["id"], is_recurring=True)
+                        append_journal(f"✓ {t['task']}")
+                        st.rerun()
     else:
-        st.write("No entries yet.")
+        st.caption("No daily habits yet")
+    
+    # Add recurring task
+    with st.expander("+ Add daily habit"):
+        new_habit = st.text_input("Habit", key="new_habit", placeholder="e.g., Morning workout")
+        habit_cat = st.selectbox("Category", list(CATEGORIES.keys()), format_func=lambda x: CATEGORIES[x], key="habit_cat")
+        if st.button("Add Habit") and new_habit:
+            add_task(new_habit, category=habit_cat, is_recurring=True)
+            st.rerun()
     
     st.divider()
     
-    # Context editor (collapsed by default)
+    # Context editor
     with st.expander("⚙️ Edit Context"):
-        new_context = st.text_area("Your context", value=read_context(), height=200, label_visibility="collapsed")
+        new_context = st.text_area("Your context", value=read_context(), height=300, label_visibility="collapsed")
         if st.button("Save Context"):
             save_context(new_context)
             st.success("Saved!")
 
-# --- MAIN CHAT ---
-# Quick capture buttons
-st.write("**Quick capture:**")
-col1, col2, col3, col4 = st.columns(4)
-with col1:
-    if st.button("🔋 Energy check"):
-        st.session_state.quick_prompt = "How's my energy right now?"
-with col2:
-    if st.button("🎯 What's next?"):
-        st.session_state.quick_prompt = "What should I focus on next?"
-with col3:
-    if st.button("💭 Quick thought"):
-        st.session_state.quick_prompt = "I want to capture a quick thought"
-with col4:
-    if st.button("🌙 Wrap up"):
-        st.session_state.quick_prompt = "Let's wrap up the day"
+# --- MAIN AREA: Tabs for different views ---
+tab_chat, tab_tasks, tab_journal = st.tabs(["💬 Chat", "📋 Tasks", "📝 Journal"])
 
-st.divider()
+with tab_chat:
+    # Quick actions
+    st.write("**Quick check-in:**")
+    qcols = st.columns(4)
+    with qcols[0]:
+        if st.button("🌅 Morning start", use_container_width=True):
+            st.session_state.quick_prompt = "Good morning! Let's plan the day."
+    with qcols[1]:
+        if st.button("🎯 What's next?", use_container_width=True):
+            st.session_state.quick_prompt = "Based on my energy and tasks, what should I focus on next?"
+    with qcols[2]:
+        if st.button("💭 Brain dump", use_container_width=True):
+            st.session_state.quick_prompt = "I need to dump some thoughts"
+    with qcols[3]:
+        if st.button("🌙 Day wrap-up", use_container_width=True):
+            st.session_state.quick_prompt = "Let's wrap up the day - what did I accomplish?"
+    
+    st.divider()
+    
+    # Chat display
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+    
+    # Handle input
+    if "quick_prompt" in st.session_state:
+        prompt = st.session_state.quick_prompt
+        del st.session_state.quick_prompt
+    else:
+        prompt = st.chat_input("What's on your mind?")
+    
+    if prompt:
+        with st.chat_message("user"):
+            st.markdown(prompt)
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        
+        with st.spinner("Thinking..."):
+            response = get_ai_response(prompt)
+        
+        with st.chat_message("assistant"):
+            st.markdown(response)
+        st.session_state.messages.append({"role": "assistant", "content": response})
+        
+        save_chat_history(st.session_state.messages)
+        st.rerun()
+    
+    # Welcome message
+    if not st.session_state.messages:
+        greetings = {"morning": "Good morning", "afternoon": "Good afternoon", "evening": "Good evening"}
+        with st.chat_message("assistant"):
+            if streak["current"] == 1:
+                st.markdown(f"{greetings[get_time_of_day()]}! 👋 Welcome to your first standup. Start by logging your energy, then let's chat about your day.")
+            else:
+                st.markdown(f"{greetings[get_time_of_day()]}! Day {streak['current']} - how are you feeling? Log your energy and let's plan.")
 
-# Display chat history
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+with tab_tasks:
+    st.subheader("Add New Task")
+    
+    col1, col2, col3 = st.columns([3, 1, 1])
+    with col1:
+        new_task = st.text_input("Task", placeholder="What needs to be done?", label_visibility="collapsed")
+    with col2:
+        task_category = st.selectbox("Category", list(CATEGORIES.keys()), format_func=lambda x: CATEGORIES[x], label_visibility="collapsed")
+    with col3:
+        if st.button("Add Task", use_container_width=True) and new_task:
+            add_task(new_task, category=task_category)
+            append_journal(f"Added task: {new_task}")
+            st.rerun()
+    
+    st.divider()
+    
+    # Display tasks by category
+    open_tasks = get_open_tasks()
+    
+    for cat_key, cat_name in CATEGORIES.items():
+        cat_tasks = [t for t in open_tasks if t.get("category") == cat_key]
+        if cat_tasks:
+            st.subheader(cat_name)
+            for t in cat_tasks:
+                col1, col2, col3 = st.columns([5, 1, 1])
+                with col1:
+                    st.write(f"• {t['task']}")
+                    st.caption(f"Added: {t['created']}")
+                with col2:
+                    if st.button("✓", key=f"done_{t['id']}"):
+                        complete_task(t["id"])
+                        append_journal(f"Completed: {t['task']}")
+                        st.rerun()
+                with col3:
+                    if st.button("🗑", key=f"del_{t['id']}"):
+                        delete_task(t["id"])
+                        st.rerun()
+    
+    if not open_tasks:
+        st.info("No open tasks. Add one above or chat with your assistant!")
+    
+    # Show completed today
+    data = read_tasks()
+    completed_today = [t for t in data["tasks"] if t.get("completed") == get_today()]
+    if completed_today:
+        with st.expander(f"✅ Completed today ({len(completed_today)})"):
+            for t in completed_today:
+                st.write(f"~~{t['task']}~~ ({CATEGORIES.get(t.get('category', 'work'), 'Other')})")
 
-# Handle quick prompts
-if "quick_prompt" in st.session_state:
-    prompt = st.session_state.quick_prompt
-    del st.session_state.quick_prompt
-else:
-    prompt = st.chat_input("What's on your mind?")
-
-if prompt:
-    # Show user message
-    with st.chat_message("user"):
-        st.markdown(prompt)
-    st.session_state.messages.append({"role": "user", "content": prompt})
+with tab_journal:
+    st.subheader(f"📝 Journal - {get_today()}")
     
-    # Get and process AI response
-    with st.spinner("Thinking..."):
-        raw_response = get_ai_response(prompt)
-        display_text = process_ai_actions(raw_response)
+    # Quick journal entry
+    quick_entry = st.text_area("Quick thought", placeholder="Capture a thought, insight, or note...", height=100)
+    if st.button("Add Entry") and quick_entry:
+        append_journal(quick_entry)
+        st.rerun()
     
-    # Show AI message
-    with st.chat_message("assistant"):
-        st.markdown(display_text)
-    st.session_state.messages.append({"role": "assistant", "content": display_text})
+    st.divider()
     
-    # Persist chat history
-    save_chat_history(st.session_state.messages)
+    # Display today's journal
+    journal_content = read_today_journal()
+    if journal_content:
+        st.markdown(journal_content)
+    else:
+        st.info("No journal entries yet today. Start by logging your energy or adding a thought!")
     
-    # Rerun to update sidebar if tasks changed
-    st.rerun()
-
-# First-time welcome
-if not st.session_state.messages:
-    time_greeting = {"morning": "Good morning", "afternoon": "Good afternoon", "evening": "Good evening"}
-    greeting = time_greeting[get_time_of_day()]
-    
-    with st.chat_message("assistant"):
-        if streak["current"] == 1:
-            st.markdown(f"{greeting}! 👋 Welcome to your first standup. What's on your mind today?")
-        else:
-            st.markdown(f"{greeting}! Day {streak['current']} - what are we working on?")
+    # Past journals
+    st.divider()
+    with st.expander("📚 Past Journals"):
+        journal_files = sorted(JOURNAL_DIR.glob("*.md"), reverse=True)[:7]
+        for jf in journal_files:
+            if jf.stem != get_today():
+                st.write(f"**{jf.stem}**")
+                st.caption(jf.read_text()[:200] + "..." if len(jf.read_text()) > 200 else jf.read_text())
