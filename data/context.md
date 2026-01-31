@@ -10,9 +10,9 @@
 - Building knowledge in virtual validation + AI/ML
 
 ## This Week's Priorities
-- [ ] Priority 1
-- [ ] Priority 2
-- [ ] Priority 3
+- [Write new linkedin article ] Priority 1
+- [ take Mrinali to breakfast buffet] Priority 2
+- [hit gym 3 days ] Priority 3
 
 ## Notes
 - Add anything the AI should know about you here
